@@ -33,8 +33,8 @@ import android.os.Environment;
 import android.os.Handler;
 import android.os.Message;
 import android.preference.PreferenceManager;
-import android.support.annotation.NonNull;
-import android.support.annotation.Nullable;
+import androidx.annotation.Nullable;
+import androidx.annotation.NonNull;
 import android.text.Editable;
 import android.text.Html;
 import android.text.TextWatcher;
@@ -76,6 +76,8 @@ import android.widget.ProgressBar;
 import android.widget.TextView;
 import android.widget.Toast;
 
+import com.sun.security.sasl.Provider;
+
 import org.json.JSONArray;
 import org.json.JSONException;
 
@@ -92,14 +94,26 @@ import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.io.OutputStreamWriter;
 import java.net.HttpURLConnection;
+import java.net.MalformedURLException;
 import java.net.URL;
+import java.net.URLConnection;
 import java.nio.charset.StandardCharsets;
+import java.security.Security;
 import java.util.ArrayList;
 import java.util.Date;
 import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+
+import javax.security.auth.callback.Callback;
+import javax.security.auth.callback.NameCallback;
+import javax.security.auth.callback.PasswordCallback;
+import javax.security.sasl.RealmCallback;
+import javax.security.sasl.Sasl;
+import javax.security.sasl.SaslClient;
+import javax.security.sasl.SaslException;
 
 import landau.sweb.utils.ExceptionLogger;
 
@@ -358,6 +372,94 @@ public class MainActivity extends Activity {
             }
         });
         webview.setWebViewClient(new WebViewClient() {
+            private String user;
+            private String mechs;
+            private String mech;
+            private String password;
+            private String s2s;
+            private String c2s;
+            private String s2c;
+            private SaslClient sc;
+
+            public void log(String msg) {
+                Log.d(TAG, msg);
+            }
+
+            public void printRequestHeaders(Map<String, String> requestHeaders) {
+                log("-------------------");
+                log("printRequestHeaders");
+                // https://stackoverflow.com/a/69379440/433626
+                for (Map.Entry me : requestHeaders.entrySet()) {
+                    log(me.getKey() + ": " + me.getValue());
+                }
+            }
+
+            public void printRequestProperties(Map<String, List<String>>  requestProperties) {
+                log("-------------------");
+                log("printRequestProperties");
+                // https://stackoverflow.com/a/69379440/433626
+                for (Map.Entry<String, List<String>> me : requestProperties.entrySet()) {
+                    for (String value:  me.getValue())
+                        log(me.getKey() + ": " + value);
+                }
+            }
+
+            public void printResponseHeaders(URLConnection urlConnection ) {
+                log("--------------------");
+                log("printResponseHeaders");
+                int n = 0;
+                String headerFieldKey;
+                while ((headerFieldKey = urlConnection.getHeaderFieldKey(n)) != null) {
+                    String headerField = urlConnection.getHeaderField(n);
+                    log(headerFieldKey + ": " + headerField);
+                    n += 1;
+                }
+            }
+            String printBody(Map<String, String> sasl) {
+                String body = "<html><body><pre>";
+                for (Map.Entry<String, String> me : sasl.entrySet()) {
+                    body += me.getKey() + ": " + me.getValue() + "\n";
+                }
+                body += "</pre></body></html>";
+                return body;
+            }
+
+            public void processCallbacks(final Callback[] callbacks) {
+                for (final Callback callback : callbacks) {
+                    if (callback instanceof NameCallback) {
+                        final NameCallback nameCallback = (NameCallback) callback;
+                        nameCallback.setName(nameCallback.getDefaultName());
+                    } else if (callback instanceof PasswordCallback) {
+                        final PasswordCallback passwordCallback = (PasswordCallback) callback;
+                        passwordCallback.setPassword(password.toCharArray());
+                    } else if (callback instanceof RealmCallback) {
+                        final RealmCallback realmCallback = (RealmCallback) callback;
+                        System.err.println("RealmCallback: " + realmCallback.getDefaultText());
+                        realmCallback.setText(realmCallback.getDefaultText());
+                    }
+                }
+            }
+            public void saslStep(String s2cBase64) throws SaslException {
+                c2s = null;
+                if (s2cBase64 != null) {
+                    final byte[] challenge = Base64.decode(s2cBase64, Base64.NO_WRAP);
+                    log(new String(challenge));
+                    final byte[] response = sc.evaluateChallenge(challenge);
+                    if (response == null) {
+                        log("response is null");
+                    } else {
+                        log(new String(response));
+                        c2s = Base64.encodeToString(response, Base64.NO_WRAP);
+                    }
+                    if (sc.isComplete()) {
+                        log("sc.isComplete()");
+                        sc.dispose();
+                        sc = null;
+                    }
+                }
+            }
+
+
             @Override
             public void onPageStarted(WebView view, String url, Bitmap favicon) {
                 progressBar.setProgress(0);
@@ -381,6 +483,35 @@ public class MainActivity extends Activity {
                     }
                 }
                 injectCSS(view);
+                if (mechs != null) {
+                    new AlertDialog.Builder(MainActivity.this)
+                            .setTitle(mechs)
+                            .setView(R.layout.login_password)
+                            .setCancelable(false)
+                            .setPositiveButton("OK", (dialog, which) -> {
+                                try {
+                                    user = ((EditText) ((Dialog) dialog).findViewById(R.id.username)).getText().toString();
+                                    password = ((EditText) ((Dialog) dialog).findViewById(R.id.password)).getText().toString();
+                                    if (!user.isEmpty()) {
+                                        mech = "DIGEST-MD5";
+                                        final String[] mechanisms = { mech };
+                                        String serverName = new URL(webview.getUrl()).getHost();
+                                        sc = Sasl.createSaslClient(mechanisms, user, "http", serverName, null, (final Callback[] callbacks) -> {
+                                            processCallbacks(callbacks);
+                                        });
+                                        saslStep(s2c);
+                                        webview.reload();
+                                    }
+                                } catch (MalformedURLException e) {
+                                    throw new RuntimeException(e);
+                                } catch (SaslException e) {
+                                    throw new RuntimeException(e);
+                                }
+                            })
+                            .setNegativeButton("Cancel", (dialog, which) -> {
+                            })
+                            .show();
+                }
             }
 
             @Override
@@ -401,6 +532,16 @@ public class MainActivity extends Activity {
 
             String lastMainPage = "";
 
+            private void cleanup() throws SaslException {
+                if (sc != null) {
+                    sc.dispose();
+                    sc = null;
+                }
+                s2s = null;
+                c2s = null;
+                s2c = null;
+            }
+
             @Override
             public WebResourceResponse shouldInterceptRequest(WebView view, WebResourceRequest request) {
                 if (adBlocker != null) {
@@ -411,7 +552,96 @@ public class MainActivity extends Activity {
                         return new WebResourceResponse("text/plain", "UTF-8", emptyInputStream);
                     }
                 }
-                return super.shouldInterceptRequest(view, request);
+                WebResourceResponse webResourceResponse = null;
+                String strURL = request.getUrl().toString();
+                log(strURL);
+                if (!strURL.toLowerCase().endsWith("/favicon.ico")) {
+                    try {
+                        URL url = new URL(strURL);
+                        for (;;) {
+                            HttpURLConnection httpURLConnection = (HttpURLConnection) url.openConnection();
+                            for (Map.Entry<String, String> me : request.getRequestHeaders().entrySet()) {
+                                httpURLConnection.addRequestProperty(me.getKey(), me.getValue());
+                            }
+                            httpURLConnection.setRequestMethod(request.getMethod());
+                            boolean hasAuthorization = false;
+                            String authorization = "SASL";
+                            if (mech != null) {
+                                authorization += " mech=\"" + mech + "\"";
+                                hasAuthorization = true;
+                                mech = null;
+                            }
+                            if (s2s != null) {
+                                authorization += " s2s=\"" + s2s + "\"";
+                                hasAuthorization = true;
+                            }
+                            if (c2s != null) {
+                                authorization += " c2s=\"" + c2s + "\"";
+                                hasAuthorization = true;
+                            }
+                            if (hasAuthorization) {
+                                httpURLConnection.addRequestProperty("Authorization", authorization);
+                            }
+                            Map<String,List<String>> requestProperties = httpURLConnection.getRequestProperties();
+                            printRequestProperties(requestProperties);
+                            int responseCode = httpURLConnection.getResponseCode();
+                            log("responseCode: " + responseCode);
+                            log("responseMessage: " + httpURLConnection.getResponseMessage());
+                            printResponseHeaders(httpURLConnection);
+                            if (responseCode == HttpURLConnection.HTTP_UNAUTHORIZED) {
+                                String wwwAuthenticate = httpURLConnection.getHeaderField("WWW-Authenticate");
+                                if (wwwAuthenticate != null) {
+                                    Map<String, String> sasl = SaslParser.parse(wwwAuthenticate);
+                                    s2s = sasl.get("s2s");
+                                    s2c = sasl.get("s2c");
+                                    mechs = sasl.get("mech");
+                                    if (mechs != null) {
+                                        cleanup();
+                                        if (sc != null) {
+                                            log("Authentication FAILED");
+                                            cleanup();
+                                        }
+                                        System.out.println("mechs: " + mechs);
+                                        break;
+                                    }
+                                    saslStep(s2c);
+                                    if (sc == null) {
+                                        break;
+                                    }
+                                } else {
+                                    break;
+                                }
+                            } else if (responseCode == HttpURLConnection.HTTP_OK) {
+                                if (sc != null) {
+                                    InputStream inputStream = httpURLConnection.getInputStream();
+                                    String contentTypeInput = httpURLConnection.getHeaderField("Content-Type");
+                                    String mimeType = "text/html";
+                                    String encoding = "UTF-8";
+//                                if (contentTypeInput != null) {
+//                                    ContentType contentType = org.apache.http.entity.ContentType.parse(contentTypeInput);
+//                                    mimeType = contentType.getMimeType();
+//                                    encoding = contentType.getCharset().toString();
+//                                }
+                                    log("mimeType: " + mimeType);
+                                    log("encoding: " + encoding);
+                                    webResourceResponse = new WebResourceResponse(mimeType, encoding, inputStream);
+                                    cleanup();
+                                }
+                                break;
+                            } else {
+                                log("server error: " + responseCode);
+                                cleanup();
+                                break;
+                            }
+                        }
+                    } catch (MalformedURLException e) {
+                        throw new RuntimeException(e);
+                    } catch (IOException e) {
+                        System.err.print(e.getMessage());
+                        throw new RuntimeException(e);
+                    }
+                }
+                return webResourceResponse;
             }
 
             @Override
@@ -677,6 +907,7 @@ public class MainActivity extends Activity {
     @Override
     public void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        Security.addProvider(new Provider());
 
         Thread.setDefaultUncaughtExceptionHandler(new Thread.UncaughtExceptionHandler() {
             private Thread.UncaughtExceptionHandler defaultUEH = Thread.getDefaultUncaughtExceptionHandler();
