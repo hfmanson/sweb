@@ -275,7 +275,7 @@ public class MainActivity extends Activity {
     private WebView createWebView(Bundle bundle) {
         final ProgressBar progressBar = findViewById(R.id.progressbar);
 
-        WebView webview = new WebView(this);
+        MediaWebView webview = new MediaWebView(this);
         if (bundle != null) {
             webview.restoreState(bundle);
         }
