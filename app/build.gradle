@@ -1,9 +1,10 @@
 apply plugin: 'com.android.application'
 
 android {
-    compileSdkVersion 32
+    compileSdkVersion 34
     defaultConfig {
         applicationId "landau.sweb"
+        targetSdk 34
         minSdkVersion 21
         versionCode 6
         versionName "1.5"
